@@ -1,0 +1,13 @@
+{
+  "name": "grok-openai-proxy",
+  "version": "1.0.0",
+  "description": "Proxy for xAI Grok API compatible with OpenAI SDK",
+  "scripts": {
+    "build": "echo 'No build step needed for Vercel Edge functions'"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
