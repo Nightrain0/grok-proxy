@@ -1,75 +1,86 @@
 export const config = {
-  runtime: 'edge', // 使用 Edge Runtime 降低延迟
-  regions: ['iad1', 'sfo1', 'hnd1', 'sin1'], // 可选：指定部署区域
+  api: {
+    bodyParser: false, // 禁用 Vercel 默认的 Body 解析，直接透传流
+    externalResolver: true,
+  },
 };
 
-const UPSTREAM_URL = 'https://api.x.ai'; // Grok 的 API 地址
+const UPSTREAM_URL = 'https://api.x.ai';
 
 export default async function handler(req: Request) {
-  const url = new URL(req.url);
-  
-  // 1. 处理 CORS (如果是 OPTIONS 请求，直接返回允许)
+  // 1. 处理 CORS 预检请求 (OPTIONS)
   if (req.method === 'OPTIONS') {
     return new Response(null, {
       status: 204,
       headers: {
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+        'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
       },
     });
   }
 
-  // 2. 简单的首页欢迎信息
+  // 2. 首页健康检查
+  const url = new URL(req.url);
   if (url.pathname === '/' || url.pathname === '/api/index') {
-     return new Response(`Grok Proxy is running. \nUse /v1/chat/completions as your base URL.`, {
+    return new Response('Grok Proxy is running. Point your client to /v1/chat/completions', {
       status: 200,
     });
   }
 
   try {
-    // 3. 构建上游请求 URL
-    // 从请求路径中提取 /v1/... 部分。Vercel rewrite 后 pathname 可能是 /api/index，我们需要原始路径
-    // 这里简单处理：假设客户端请求的是 /v1/chat/completions，我们拼接到 UPSTREAM_URL 后
-    // 注意：如果通过 vercel.json rewrite，req.url 可能是重写后的，这里我们利用 path 修正
+    // 3. 构建上游 URL
+    // 我们假设客户端请求的是 /v1/chat/completions
+    // Vercel 的 rewrite 会让 req.url 保持原样，或者变成 /api/index
+    // 这里我们强制修正路径
     let targetPath = url.pathname;
-    if (targetPath.startsWith('/api/index')) {
-        // 尝试从 search params 或者原始 URL 恢复，或者简单地默认透传
-        // 在 Vercel Edge 中，rewrites 后的 req.url 通常保留原始路径
-        // 如果这里遇到路径问题，可以根据实际情况调整
-    }
     
-    // 修正：确保路径以 /v1 开头 (xAI 的 API 是 /v1/chat/completions)
+    // 如果路径被 Vercel 重写成了 /api/index，我们需要尝试恢复它，
+    // 但最简单的方法是假设这个代理只用于 /v1/chat/completions
+    if (targetPath === '/api/index') {
+        // 如果客户端直接请求根路径转发过来的，我们默认它想访问 chat completions
+        // 或者我们检查 URL search params
+        targetPath = '/v1/chat/completions';
+    }
+
+    // 确保 targetPath 以 /v1 开头，如果不是（且不是 api/index），则可能需要保留
     if (!targetPath.startsWith('/v1')) {
-         // 如果路径不是 /v1 开头，可能需要调整，或者直接透传
+       // 简单的容错：如果用户发了 /chat/completions，我们给它补上 /v1
+       if (targetPath.startsWith('/chat')) {
+         targetPath = '/v1' + targetPath;
+       }
     }
 
     const targetUrl = new URL(targetPath + url.search, UPSTREAM_URL);
 
     // 4. 处理 Headers
     const headers = new Headers(req.headers);
-    headers.delete('host'); // 删除 host，让 fetch 自动设置
-    headers.delete('connection');
+    headers.delete('host');
+    headers.delete('content-length'); // 让 fetch 自动计算
     
-    // 支持在 Vercel 环境变量中配置 GROK_API_KEY，也可以从客户端传 Authorization
+    // 支持 Vercel 环境变量中的 KEY (可选)
     const envKey = process.env.GROK_API_KEY;
     if (envKey && !headers.get('Authorization')) {
       headers.set('Authorization', `Bearer ${envKey}`);
     }
 
-    // 5. 转发请求
+    // 5. 发起请求
     const upstreamResponse = await fetch(targetUrl.toString(), {
       method: req.method,
       headers: headers,
-      body: req.body, // 直接透传请求体（流）
-      redirect: 'follow',
+      body: req.method !== 'GET' && req.method !== 'HEAD' ? req.body : null,
+      // @ts-ignore: Vercel edge/node fetch type fix
+      duplex: 'half', 
     });
 
-    // 6. 处理响应 Headers
+    // 6. 设置响应头
     const responseHeaders = new Headers(upstreamResponse.headers);
-    responseHeaders.set('Access-Control-Allow-Origin', '*'); // 再次确保 CORS
+    responseHeaders.set('Access-Control-Allow-Origin', '*');
     
-    // 7. 返回响应 (直接透传 body 流)
+    // 移除可能引起问题的头
+    responseHeaders.delete('content-encoding'); 
+
+    // 7. 返回流式响应
     return new Response(upstreamResponse.body, {
       status: upstreamResponse.status,
       statusText: upstreamResponse.statusText,
@@ -77,7 +88,8 @@ export default async function handler(req: Request) {
     });
 
   } catch (error: any) {
-    return new Response(JSON.stringify({ error: error.message }), {
+    console.error('Proxy Error:', error);
+    return new Response(JSON.stringify({ error: error.message || 'Internal Proxy Error' }), {
       status: 500,
       headers: { 'Content-Type': 'application/json' },
     });
